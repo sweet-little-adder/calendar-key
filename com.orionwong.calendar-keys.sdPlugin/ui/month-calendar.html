@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+
+<head lang="en">
+    <title>Month Calendar Settings</title>
+    <meta charset="utf-8" />
+    <script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+</head>
+
+<body>
+    <sdpi-item label="Year">
+        <sdpi-select setting="year" id="yearSelect"></sdpi-select>
+    </sdpi-item>
+    <sdpi-item label="Month">
+        <sdpi-select setting="month">
+            <option value="1">January</option>
+            <option value="2">February</option>
+            <option value="3">March</option>
+            <option value="4">April</option>
+            <option value="5">May</option>
+            <option value="6">June</option>
+            <option value="7">July</option>
+            <option value="8">August</option>
+            <option value="9">September</option>
+            <option value="10">October</option>
+            <option value="11">November</option>
+            <option value="12">December</option>
+        </sdpi-select>
+    </sdpi-item>
+    <sdpi-item label="Today Color">
+        <sdpi-color setting="themeColor" default="#ff0069"></sdpi-color>
+    </sdpi-item>
+    <script>
+        const currentYear = new Date().getFullYear();
+        const years = [...new Set([currentYear, currentYear + 1])].sort((a, b) => a - b);
+        const yearSelect = document.getElementById("yearSelect");
+
+        for (const year of years) {
+            const option = document.createElement("option");
+            option.value = String(year);
+            option.textContent = String(year);
+            yearSelect.appendChild(option);
+        }
+
+        yearSelect.setAttribute("default", String(currentYear));
+    </script>
+</body>
+
+</html>
