@@ -1,16 +1,19 @@
 import streamDeck, {
 	action,
 	DidReceiveSettingsEvent,
+	KeyDownEvent,
 	SingletonAction,
 	Target,
 	WillAppearEvent,
 } from "@elgato/streamdeck";
 
-import { renderCalendarImage } from "../lib/calendar-image";
+import { fetchMonthEvents } from "../lib/calendar-events";
+import { type CalendarViewMode, renderCalendarImage } from "../lib/calendar-image";
 import { getLocalDateKey, getMsUntilNextMidnight, normalizeYear } from "../lib/calendar";
 
 const DATE_POLL_INTERVAL_MS = 60_000;
 const REFRESH_BURST_DELAYS_MS = [0, 2_000, 5_000, 15_000];
+const VIEW_MODES: CalendarViewMode[] = ["month", "events", "year"];
 
 @action({ UUID: "com.orionwong.calendar-keys.month" })
 export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
@@ -38,6 +41,16 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 
 	override onDidReceiveSettings(ev: DidReceiveSettingsEvent<MonthCalendarSettings>): void | Promise<void> {
 		return this.render(ev.action, ev.payload.settings);
+	}
+
+	override async onKeyDown(ev: KeyDownEvent<MonthCalendarSettings>): Promise<void> {
+		const { settings } = ev.payload;
+		const currentIndex = normalizeViewModeIndex(settings.viewMode);
+		const nextIndex = (currentIndex + 1) % VIEW_MODES.length;
+
+		settings.viewMode = nextIndex;
+		await ev.action.setSettings(settings);
+		await this.render(ev.action, settings);
 	}
 
 	private startAutoRefresh(): void {
@@ -103,7 +116,13 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 	): Promise<void> {
 		const month = normalizeMonth(settings.month);
 		const year = normalizeYear(settings.year);
-		const image = renderCalendarImage(year, month, { themeColor: settings.themeColor });
+		const viewMode = getViewMode(settings.viewMode);
+		const events = viewMode === "events" ? await fetchMonthEvents(year, month) : undefined;
+		const image = renderCalendarImage(year, month, {
+			themeColor: settings.themeColor,
+			viewMode,
+			events,
+		});
 
 		await action.setImage(image, { target: Target.HardwareAndSoftware });
 		await action.setTitle("");
@@ -114,6 +133,7 @@ type MonthCalendarSettings = {
 	month?: number | string;
 	year?: number | string;
 	themeColor?: string;
+	viewMode?: number | string;
 };
 
 function normalizeMonth(month: number | string | undefined): number {
@@ -124,4 +144,18 @@ function normalizeMonth(month: number | string | undefined): number {
 	}
 
 	return parsed;
+}
+
+function normalizeViewModeIndex(viewMode: number | string | undefined): number {
+	const parsed = typeof viewMode === "string" ? Number.parseInt(viewMode, 10) : viewMode;
+	if (parsed === undefined || Number.isNaN(parsed)) {
+		return 0;
+	}
+
+	const wrapped = ((parsed % VIEW_MODES.length) + VIEW_MODES.length) % VIEW_MODES.length;
+	return wrapped;
+}
+
+function getViewMode(viewMode: number | string | undefined): CalendarViewMode {
+	return VIEW_MODES[normalizeViewModeIndex(viewMode)] ?? "month";
 }

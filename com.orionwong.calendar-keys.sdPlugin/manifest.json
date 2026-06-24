@@ -7,7 +7,7 @@
 			"Name": "Month Calendar",
 			"UUID": "com.orionwong.calendar-keys.month",
 			"Icon": "imgs/actions/month-calendar/icon",
-			"Tooltip": "Shows a calendar for a selected month of the current year.",
+			"Tooltip": "Month calendar. Press to cycle month, events, and year views.",
 			"PropertyInspectorPath": "ui/month-calendar.html",
 			"Controllers": [
 				"Keypad"

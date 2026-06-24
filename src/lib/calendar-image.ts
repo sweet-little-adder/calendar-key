@@ -1,12 +1,15 @@
 import { existsSync } from "node:fs";
 import { Resvg } from "@resvg/resvg-js";
 
+import type { CalendarEvent } from "./calendar-events";
 import { buildMonthWeeks, getCurrentYear, getMonthAbbrev } from "./calendar";
+import { getContrastTextColor } from "./color";
 
 const WEEKDAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"] as const;
 const FONT_FAMILY = "Arial, Helvetica Neue, Helvetica, sans-serif";
 const RENDER_SIZE = 288;
 const OUTPUT_SIZE = 144;
+const MAX_EVENT_LINES = 6;
 
 const FONT_CANDIDATES = [
 	"/System/Library/Fonts/Supplemental/Arial.ttf",
@@ -17,16 +20,37 @@ const FONT_CANDIDATES = [
 
 const DEFAULT_THEME_COLOR = "#ff0069";
 
+export type CalendarViewMode = "month" | "events" | "year";
+
 export type CalendarRenderOptions = {
 	themeColor?: string;
+	viewMode?: CalendarViewMode;
+	events?: CalendarEvent[];
 };
 
 /**
- * Renders a calendar month as a crisp PNG data URI using Arial at a consistent size.
+ * Renders a calendar key image as a crisp PNG data URI.
  */
 export function renderCalendarImage(year: number, month: number, options: CalendarRenderOptions = {}): string {
 	const themeColor = normalizeThemeColor(options.themeColor);
-	const svg = buildCalendarSvg(year, month, RENDER_SIZE, themeColor);
+	const viewMode = options.viewMode ?? "month";
+
+	let svg: string;
+	switch (viewMode) {
+		case "events":
+			svg = buildEventsSvg(year, month, RENDER_SIZE, themeColor, options.events ?? []);
+			break;
+		case "year":
+			svg = buildYearSvg(year, month, RENDER_SIZE, themeColor);
+			break;
+		default:
+			svg = buildMonthSvg(year, month, RENDER_SIZE, themeColor);
+	}
+
+	return svgToDataUri(svg);
+}
+
+function svgToDataUri(svg: string): string {
 	const fontFile = FONT_CANDIDATES.find((path) => existsSync(path));
 
 	const resvg = new Resvg(svg, {
@@ -42,11 +66,12 @@ export function renderCalendarImage(year: number, month: number, options: Calend
 	return `data:image/png;base64,${png.toString("base64")}`;
 }
 
-function buildCalendarSvg(year: number, month: number, size: number, themeColor: string): string {
+function buildMonthSvg(year: number, month: number, size: number, themeColor: string): string {
 	const weeks = buildMonthWeeks(year, month);
 	const today = new Date();
 	const highlightToday = today.getFullYear() === year && today.getMonth() + 1 === month;
 	const todayDate = today.getDate();
+	const todayTextColor = getContrastTextColor(themeColor);
 
 	const padding = 16;
 	const monthTitleHeight = 26;
@@ -60,12 +85,10 @@ function buildCalendarSvg(year: number, month: number, size: number, themeColor:
 	const monthTitleFontSize = 18;
 	const weekdayFontSize = 16;
 	const dayFontSize = 22;
-	// Optical correction for resvg + Arial: fine-tune circle vs digit glyph center.
 	const todayCircleOffsetX = 1.5;
 	const todayCircleOffsetY = -0.5;
 
-	let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">`;
-	svg += `<rect width="${size}" height="${size}" fill="#141414"/>`;
+	let svg = svgBackground(size);
 
 	const titleY = padding + monthTitleHeight / 2;
 	svg += textAnchored(size / 2, titleY, getMonthAbbrev(month), monthTitleFontSize, "#d8d8d8", 700, "middle");
@@ -97,7 +120,7 @@ function buildCalendarSvg(year: number, month: number, size: number, themeColor:
 				svg += `<circle cx="${cx + todayCircleOffsetX}" cy="${cy + todayCircleOffsetY}" r="${radius}" fill="${escapeXml(themeColor)}"/>`;
 			}
 
-			const fill = isToday ? "#ffffff" : "#ececec";
+			const fill = isToday ? todayTextColor : "#ececec";
 			const weight = isToday ? 600 : 400;
 			svg += dayText(cx, cy, String(day), dayFontSize, fill, weight);
 		}
@@ -105,6 +128,112 @@ function buildCalendarSvg(year: number, month: number, size: number, themeColor:
 
 	svg += "</svg>";
 	return svg;
+}
+
+function buildYearSvg(year: number, focusMonth: number, size: number, themeColor: string): string {
+	const padding = 14;
+	const titleHeight = 24;
+	const gridTop = padding + titleHeight + 6;
+	const gridHeight = size - gridTop - padding;
+	const cols = 4;
+	const rows = 3;
+	const cellWidth = (size - padding * 2) / cols;
+	const cellHeight = gridHeight / rows;
+	const monthFontSize = 15;
+	const focusTextColor = getContrastTextColor(themeColor);
+
+	const today = new Date();
+	const highlightCurrentMonth = today.getFullYear() === year;
+	const currentMonth = today.getMonth() + 1;
+
+	let svg = svgBackground(size);
+	svg += textAnchored(size / 2, padding + titleHeight / 2, String(year), 18, "#d8d8d8", 700, "middle");
+
+	for (let month = 1; month <= 12; month++) {
+		const index = month - 1;
+		const col = index % cols;
+		const row = Math.floor(index / cols);
+		const cx = padding + cellWidth * col + cellWidth / 2;
+		const cy = gridTop + cellHeight * row + cellHeight / 2;
+		const isFocusMonth = month === focusMonth;
+		const isCurrentMonth = highlightCurrentMonth && month === currentMonth;
+
+		if (isFocusMonth) {
+			const radius = Math.min(cellWidth, cellHeight) * 0.38;
+			svg += `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="${escapeXml(themeColor)}"/>`;
+		} else if (isCurrentMonth) {
+			const radius = Math.min(cellWidth, cellHeight) * 0.38;
+			svg += `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="none" stroke="${escapeXml(themeColor)}" stroke-width="2"/>`;
+		}
+
+		const fill = isFocusMonth ? focusTextColor : isCurrentMonth ? themeColor : "#bdbdbd";
+		const weight = isFocusMonth || isCurrentMonth ? 700 : 500;
+		svg += text(cx, cy, getMonthAbbrev(month), monthFontSize, fill, weight);
+	}
+
+	svg += "</svg>";
+	return svg;
+}
+
+function buildEventsSvg(
+	year: number,
+	month: number,
+	size: number,
+	themeColor: string,
+	events: CalendarEvent[],
+): string {
+	const padding = 14;
+	const titleHeight = 24;
+	const listTop = padding + titleHeight + 8;
+	const listHeight = size - listTop - padding;
+	const lineHeight = listHeight / MAX_EVENT_LINES;
+	const titleFontSize = 16;
+	const eventFontSize = 14;
+
+	let svg = svgBackground(size);
+	svg += textAnchored(size / 2, padding + titleHeight / 2, getMonthAbbrev(month), titleFontSize, "#d8d8d8", 700, "middle");
+
+	if (year !== getCurrentYear()) {
+		svg += textAnchored(size - padding, padding + titleHeight / 2, String(year), titleFontSize, "#d8d8d8", 700, "end");
+	}
+
+	const visibleEvents = events.slice(0, events.length > MAX_EVENT_LINES ? MAX_EVENT_LINES - 1 : MAX_EVENT_LINES);
+	if (visibleEvents.length === 0) {
+		svg += textAnchored(size / 2, listTop + listHeight / 2, "No events", eventFontSize, "#8a8a8a", 500, "middle");
+		svg += "</svg>";
+		return svg;
+	}
+
+	for (let index = 0; index < visibleEvents.length; index++) {
+		const event = visibleEvents[index];
+		const y = listTop + lineHeight * index + lineHeight / 2;
+		const dayLabel = String(event.start.getDate()).padStart(2, "0");
+		const title = truncateText(event.title, 16);
+		const line = `${dayLabel}  ${title}`;
+
+		svg += textAnchored(padding, y, line, eventFontSize, "#e0e0e0", 500, "start");
+	}
+
+	if (events.length > MAX_EVENT_LINES) {
+		const moreCount = events.length - visibleEvents.length;
+		const y = listTop + lineHeight * visibleEvents.length + lineHeight / 2;
+		svg += textAnchored(padding, y, `+${moreCount} more`, eventFontSize, themeColor, 600, "start");
+	}
+
+	svg += "</svg>";
+	return svg;
+}
+
+function svgBackground(size: number): string {
+	return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#141414"/>`;
+}
+
+function truncateText(value: string, maxLength: number): string {
+	if (value.length <= maxLength) {
+		return value;
+	}
+
+	return `${value.slice(0, maxLength - 1)}…`;
 }
 
 function dayText(x: number, y: number, value: string, fontSize: number, fill: string, weight: number): string {
