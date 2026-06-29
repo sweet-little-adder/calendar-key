@@ -8,7 +8,7 @@ import streamDeck, {
 } from "@elgato/streamdeck";
 
 import { fetchMonthEventsResult, getCachedMonthEventsResult } from "../lib/calendar-events";
-import { type CalendarViewMode, renderCalendarImage } from "../lib/calendar-image";
+import { type CalendarViewMode, getEventsPageCount, renderCalendarImage } from "../lib/calendar-image";
 import { getLocalDateKey, getMsUntilNextMidnight, normalizeYear } from "../lib/calendar";
 
 const DATE_POLL_INTERVAL_MS = 15_000;
@@ -44,18 +44,52 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 	}
 
 	override onDidReceiveSettings(ev: DidReceiveSettingsEvent<MonthCalendarSettings>): void | Promise<void> {
+		const previous = this.getRememberedSettings(ev.action.id, ev.payload.settings);
 		const settings = this.rememberSettings(ev.action.id, ev.payload.settings);
+
+		if (
+			normalizeYear(previous.year) !== normalizeYear(settings.year) ||
+			normalizeMonth(previous.month) !== normalizeMonth(settings.month)
+		) {
+			settings.eventsPage = 0;
+			this.rememberSettings(ev.action.id, settings);
+		}
+
 		return this.render(ev.action, settings);
 	}
 
 	override onKeyDown(ev: KeyDownEvent<MonthCalendarSettings>): void | Promise<void> {
 		const remembered = this.getRememberedSettings(ev.action.id, ev.payload.settings);
-		const nextIndex = (normalizeViewModeIndex(remembered.viewMode) + 1) % VIEW_MODES.length;
-		const settings = { ...remembered, viewMode: nextIndex };
+		const viewMode = getViewMode(remembered.viewMode);
+		let nextViewMode: CalendarViewMode = viewMode;
+		let eventsPage = normalizeEventsPage(remembered.eventsPage);
+
+		if (viewMode === "month") {
+			nextViewMode = "events";
+			eventsPage = 0;
+		} else if (viewMode === "events") {
+			const year = normalizeYear(remembered.year);
+			const month = normalizeMonth(remembered.month);
+			const eventCount = getCachedMonthEventsResult(year, month)?.events.length ?? 0;
+			const pageCount = getEventsPageCount(eventCount);
+
+			if (eventsPage + 1 < pageCount) {
+				eventsPage += 1;
+			} else {
+				nextViewMode = "year";
+				eventsPage = 0;
+			}
+		} else {
+			nextViewMode = "month";
+			eventsPage = 0;
+		}
+
+		const nextIndex = VIEW_MODES.indexOf(nextViewMode);
+		const settings = { ...remembered, viewMode: nextIndex, eventsPage };
 
 		this.rememberSettings(ev.action.id, settings);
 
-		void ev.action.setSettings({ viewMode: nextIndex }).catch((error: unknown) => {
+		void ev.action.setSettings({ viewMode: nextIndex, eventsPage }).catch((error: unknown) => {
 			streamDeck.logger.error("Failed to persist view mode", error);
 		});
 
@@ -220,6 +254,7 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 			themeColor: settings.themeColor,
 			viewMode,
 			events: eventsResult?.events,
+			eventsPage: normalizeEventsPage(settings.eventsPage),
 			eventsLoaded: eventsResult?.ok ?? false,
 			eventsDenied: eventsResult?.denied ?? false,
 			eventsFetchFailed: eventsResult !== undefined && !eventsResult.ok && !eventsResult.denied,
@@ -235,6 +270,7 @@ type MonthCalendarSettings = {
 	year?: number | string;
 	themeColor?: string;
 	viewMode?: number | string;
+	eventsPage?: number | string;
 };
 
 function normalizeMonth(month: number | string | undefined): number {
@@ -259,4 +295,13 @@ function normalizeViewModeIndex(viewMode: number | string | undefined): number {
 
 function getViewMode(viewMode: number | string | undefined): CalendarViewMode {
 	return VIEW_MODES[normalizeViewModeIndex(viewMode)] ?? "month";
+}
+
+function normalizeEventsPage(eventsPage: number | string | undefined): number {
+	const parsed = typeof eventsPage === "string" ? Number.parseInt(eventsPage, 10) : eventsPage;
+	if (parsed === undefined || Number.isNaN(parsed) || parsed < 0) {
+		return 0;
+	}
+
+	return parsed;
 }

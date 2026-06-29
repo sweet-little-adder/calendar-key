@@ -9,7 +9,7 @@ const WEEKDAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"] as const;
 const FONT_FAMILY = "Arial, Helvetica Neue, Helvetica, sans-serif";
 const RENDER_SIZE = 288;
 const OUTPUT_SIZE = 144;
-const MAX_EVENT_LINES = 6;
+export const EVENTS_PER_PAGE = 4;
 
 const FONT_CANDIDATES = [
 	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
@@ -30,10 +30,19 @@ export type CalendarRenderOptions = {
 	themeColor?: string;
 	viewMode?: CalendarViewMode;
 	events?: CalendarEvent[];
+	eventsPage?: number;
 	eventsLoaded?: boolean;
 	eventsDenied?: boolean;
 	eventsFetchFailed?: boolean;
 };
+
+export function getEventsPageCount(totalEvents: number): number {
+	if (totalEvents <= 0) {
+		return 1;
+	}
+
+	return Math.ceil(totalEvents / EVENTS_PER_PAGE);
+}
 
 /**
  * Renders a calendar key image as a crisp PNG data URI.
@@ -42,7 +51,8 @@ export function renderCalendarImage(year: number, month: number, options: Calend
 	const themeColor = normalizeThemeColor(options.themeColor);
 	const viewMode = options.viewMode ?? "month";
 	const events = options.events ?? [];
-	const cacheKey = buildImageCacheKey(year, month, themeColor, viewMode, events);
+	const eventsPage = options.eventsPage ?? 0;
+	const cacheKey = buildImageCacheKey(year, month, themeColor, viewMode, events, eventsPage);
 
 	const cached = imageCache.get(cacheKey);
 	if (cached !== undefined) {
@@ -58,6 +68,7 @@ export function renderCalendarImage(year: number, month: number, options: Calend
 				RENDER_SIZE,
 				themeColor,
 				events,
+				eventsPage,
 				options.eventsLoaded ?? true,
 				options.eventsDenied ?? false,
 				options.eventsFetchFailed ?? false,
@@ -209,17 +220,20 @@ function buildEventsSvg(
 	size: number,
 	themeColor: string,
 	events: CalendarEvent[],
+	eventsPage: number,
 	eventsLoaded: boolean,
 	eventsDenied: boolean,
 	eventsFetchFailed: boolean,
 ): string {
-	const padding = 14;
-	const titleHeight = 24;
-	const listTop = padding + titleHeight + 8;
+	const padding = 12;
+	const titleHeight = 26;
+	const listTop = padding + titleHeight + 6;
 	const listHeight = size - listTop - padding;
-	const lineHeight = listHeight / MAX_EVENT_LINES;
-	const titleFontSize = 16;
-	const eventFontSize = 14;
+	const lineHeight = listHeight / EVENTS_PER_PAGE;
+	const titleFontSize = 17;
+	const eventFontSize = 18;
+	const pageStart = eventsPage * EVENTS_PER_PAGE;
+	const visibleEvents = events.slice(pageStart, pageStart + EVENTS_PER_PAGE);
 
 	let svg = svgBackground(size);
 	svg += textAnchored(size / 2, padding + titleHeight / 2, getMonthAbbrev(month), titleFontSize, "#d8d8d8", 700, "middle");
@@ -228,7 +242,6 @@ function buildEventsSvg(
 		svg += textAnchored(size - padding, padding + titleHeight / 2, String(year), titleFontSize, "#d8d8d8", 700, "end");
 	}
 
-	const visibleEvents = events.slice(0, events.length > MAX_EVENT_LINES ? MAX_EVENT_LINES - 1 : MAX_EVENT_LINES);
 	if (visibleEvents.length === 0) {
 		const emptyLabel = eventsDenied
 			? "Allow Calendar access"
@@ -248,16 +261,16 @@ function buildEventsSvg(
 		const event = visibleEvents[index];
 		const y = listTop + lineHeight * index + lineHeight / 2;
 		const dayLabel = String(event.start.getDate()).padStart(2, "0");
-		const title = truncateText(event.title, 16);
+		const title = truncateText(event.title, 13);
 		const line = `${dayLabel}  ${title}`;
 
 		svg += textAnchored(padding, y, line, eventFontSize, "#e0e0e0", 500, "start");
 	}
 
-	if (events.length > MAX_EVENT_LINES) {
-		const moreCount = events.length - visibleEvents.length;
-		const y = listTop + lineHeight * visibleEvents.length + lineHeight / 2;
-		svg += textAnchored(padding, y, `+${moreCount} more`, eventFontSize, themeColor, 600, "start");
+	const pageCount = getEventsPageCount(events.length);
+	if (pageCount > 1) {
+		const pageLabel = `${eventsPage + 1}/${pageCount}`;
+		svg += textAnchored(size - padding, size - padding, pageLabel, 12, "#6a6a6a", 500, "end");
 	}
 
 	svg += "</svg>";
@@ -306,11 +319,12 @@ function buildImageCacheKey(
 	themeColor: string,
 	viewMode: CalendarViewMode,
 	events: CalendarEvent[],
+	eventsPage: number,
 ): string {
 	const todayKey = getLocalDateKey();
 	if (viewMode === "events") {
 		const eventDigest = events.map((event) => `${event.start.getTime()}:${event.title}`).join("|");
-		return `${todayKey}:${year}:${month}:${themeColor}:${viewMode}:${eventDigest}`;
+		return `${todayKey}:${year}:${month}:${themeColor}:${viewMode}:${eventsPage}:${eventDigest}`;
 	}
 
 	return `${todayKey}:${year}:${month}:${themeColor}:${viewMode}`;
