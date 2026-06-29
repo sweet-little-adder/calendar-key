@@ -1,6 +1,6 @@
 {
     "scripts": {
-        "build": "rollup -c && node scripts/copy-native-deps.mjs",
+        "build": "rollup -c && node scripts/copy-native-deps.mjs && node scripts/build-fetch-events.mjs",
         "watch": "rollup -c -w --watch.onEnd=\"node scripts/copy-native-deps.mjs && streamdeck restart com.orionwong.calendar-keys\""
     },
     "type": "module",

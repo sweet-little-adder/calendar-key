@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { Resvg } from "@resvg/resvg-js";
 
 import type { CalendarEvent } from "./calendar-events";
-import { buildMonthWeeks, getCurrentYear, getMonthAbbrev } from "./calendar";
+import { buildMonthWeeks, getCurrentYear, getLocalDateKey, getMonthAbbrev } from "./calendar";
 import { getContrastTextColor } from "./color";
 
 const WEEKDAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"] as const;
@@ -12,13 +12,17 @@ const OUTPUT_SIZE = 144;
 const MAX_EVENT_LINES = 6;
 
 const FONT_CANDIDATES = [
-	"/System/Library/Fonts/Supplemental/Arial.ttf",
 	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+	"/Library/Fonts/Arial Unicode.ttf",
+	"/System/Library/Fonts/PingFang.ttc",
+	"/System/Library/Fonts/Supplemental/Arial.ttf",
 	"/Library/Fonts/Arial.ttf",
 	"C:\\Windows\\Fonts\\arial.ttf",
 ];
 
 const DEFAULT_THEME_COLOR = "#ff0069";
+
+const imageCache = new Map<string, string>();
 
 export type CalendarViewMode = "month" | "events" | "year";
 
@@ -26,6 +30,9 @@ export type CalendarRenderOptions = {
 	themeColor?: string;
 	viewMode?: CalendarViewMode;
 	events?: CalendarEvent[];
+	eventsLoaded?: boolean;
+	eventsDenied?: boolean;
+	eventsFetchFailed?: boolean;
 };
 
 /**
@@ -34,11 +41,27 @@ export type CalendarRenderOptions = {
 export function renderCalendarImage(year: number, month: number, options: CalendarRenderOptions = {}): string {
 	const themeColor = normalizeThemeColor(options.themeColor);
 	const viewMode = options.viewMode ?? "month";
+	const events = options.events ?? [];
+	const cacheKey = buildImageCacheKey(year, month, themeColor, viewMode, events);
+
+	const cached = imageCache.get(cacheKey);
+	if (cached !== undefined) {
+		return cached;
+	}
 
 	let svg: string;
 	switch (viewMode) {
 		case "events":
-			svg = buildEventsSvg(year, month, RENDER_SIZE, themeColor, options.events ?? []);
+			svg = buildEventsSvg(
+				year,
+				month,
+				RENDER_SIZE,
+				themeColor,
+				events,
+				options.eventsLoaded ?? true,
+				options.eventsDenied ?? false,
+				options.eventsFetchFailed ?? false,
+			);
 			break;
 		case "year":
 			svg = buildYearSvg(year, month, RENDER_SIZE, themeColor);
@@ -47,17 +70,22 @@ export function renderCalendarImage(year: number, month: number, options: Calend
 			svg = buildMonthSvg(year, month, RENDER_SIZE, themeColor);
 	}
 
-	return svgToDataUri(svg);
+	const image = svgToDataUri(svg, viewMode);
+	imageCache.set(cacheKey, image);
+	return image;
 }
 
-function svgToDataUri(svg: string): string {
-	const fontFile = FONT_CANDIDATES.find((path) => existsSync(path));
+function svgToDataUri(svg: string, viewMode: CalendarViewMode): string {
+	const fontFiles =
+		viewMode === "events"
+			? FONT_CANDIDATES.filter((path) => existsSync(path))
+			: FONT_CANDIDATES.filter((path) => existsSync(path)).slice(0, 1);
 
 	const resvg = new Resvg(svg, {
 		fitTo: { mode: "width", value: OUTPUT_SIZE },
 		font: {
-			fontFiles: fontFile ? [fontFile] : undefined,
-			loadSystemFonts: true,
+			fontFiles: fontFiles.length > 0 ? fontFiles : undefined,
+			loadSystemFonts: false,
 			defaultFontFamily: "Arial",
 		},
 	});
@@ -181,6 +209,9 @@ function buildEventsSvg(
 	size: number,
 	themeColor: string,
 	events: CalendarEvent[],
+	eventsLoaded: boolean,
+	eventsDenied: boolean,
+	eventsFetchFailed: boolean,
 ): string {
 	const padding = 14;
 	const titleHeight = 24;
@@ -199,7 +230,16 @@ function buildEventsSvg(
 
 	const visibleEvents = events.slice(0, events.length > MAX_EVENT_LINES ? MAX_EVENT_LINES - 1 : MAX_EVENT_LINES);
 	if (visibleEvents.length === 0) {
-		svg += textAnchored(size / 2, listTop + listHeight / 2, "No events", eventFontSize, "#8a8a8a", 500, "middle");
+		const emptyLabel = eventsDenied
+			? "Allow Calendar access"
+			: eventsFetchFailed
+				? "Could not load events"
+				: !eventsLoaded
+					? "Loading events..."
+					: process.platform === "darwin"
+						? "No events"
+						: "Events (macOS only)";
+		svg += textAnchored(size / 2, listTop + listHeight / 2, emptyLabel, eventFontSize, "#8a8a8a", 500, "middle");
 		svg += "</svg>";
 		return svg;
 	}
@@ -258,6 +298,22 @@ function text(x: number, y: number, value: string, fontSize: number, fill: strin
 
 function escapeXml(value: string): string {
 	return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function buildImageCacheKey(
+	year: number,
+	month: number,
+	themeColor: string,
+	viewMode: CalendarViewMode,
+	events: CalendarEvent[],
+): string {
+	const todayKey = getLocalDateKey();
+	if (viewMode === "events") {
+		const eventDigest = events.map((event) => `${event.start.getTime()}:${event.title}`).join("|");
+		return `${todayKey}:${year}:${month}:${themeColor}:${viewMode}:${eventDigest}`;
+	}
+
+	return `${todayKey}:${year}:${month}:${themeColor}:${viewMode}`;
 }
 
 function normalizeThemeColor(color: string | undefined): string {

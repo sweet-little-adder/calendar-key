@@ -15,6 +15,9 @@ const MONTH_NAMES = [
 
 const MONTH_ABBREV = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;
 
+/** How many years ahead of the current year appear in settings (e.g. 7 → 2026–2033 in 2026). */
+export const YEAR_LOOKAHEAD = 7;
+
 export function getCurrentYear(): number {
 	return new Date().getFullYear();
 }
@@ -33,21 +36,28 @@ export function getMsUntilNextMidnight(now = new Date()): number {
 	return nextMidnight.getTime() - now.getTime();
 }
 
-/** Years available in the property inspector (current year + upcoming). */
+/** Years available in the property inspector (current year through lookahead). */
 export function getSelectableYears(): number[] {
-	const years = new Set([getCurrentYear(), getCurrentYear() + 1]);
-	return [...years].sort((a, b) => a - b);
+	const start = getCurrentYear();
+	const years: number[] = [];
+
+	for (let offset = 0; offset <= YEAR_LOOKAHEAD; offset++) {
+		years.push(start + offset);
+	}
+
+	return years;
 }
 
 export function normalizeYear(year: number | string | undefined): number {
 	const parsed = typeof year === "string" ? Number.parseInt(year, 10) : year;
-	const allowed = getSelectableYears();
+	const currentYear = getCurrentYear();
+	const maxYear = currentYear + YEAR_LOOKAHEAD;
 
-	if (parsed !== undefined && !Number.isNaN(parsed) && allowed.includes(parsed)) {
+	if (parsed !== undefined && !Number.isNaN(parsed) && parsed >= currentYear && parsed <= maxYear) {
 		return parsed;
 	}
 
-	return getCurrentYear();
+	return currentYear;
 }
 
 export function getMonthName(month: number): string {

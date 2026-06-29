@@ -32,7 +32,8 @@
     </sdpi-item>
     <script>
         const currentYear = new Date().getFullYear();
-        const years = [...new Set([currentYear, currentYear + 1])].sort((a, b) => a - b);
+        const yearLookahead = 7;
+        const years = Array.from({ length: yearLookahead + 1 }, (_, offset) => currentYear + offset);
         const yearSelect = document.getElementById("yearSelect");
 
         for (const year of years) {
