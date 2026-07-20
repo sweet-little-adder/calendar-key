@@ -34,6 +34,8 @@ export type CalendarRenderOptions = {
 	eventsLoaded?: boolean;
 	eventsDenied?: boolean;
 	eventsFetchFailed?: boolean;
+	holidayDays?: Set<number>;
+	eventDays?: Set<number>;
 };
 
 export function getEventsPageCount(totalEvents: number): number {
@@ -52,7 +54,9 @@ export function renderCalendarImage(year: number, month: number, options: Calend
 	const viewMode = options.viewMode ?? "month";
 	const events = options.events ?? [];
 	const eventsPage = options.eventsPage ?? 0;
-	const cacheKey = buildImageCacheKey(year, month, themeColor, viewMode, events, eventsPage);
+	const holidayDays = options.holidayDays ?? new Set<number>();
+	const eventDays = options.eventDays ?? new Set<number>();
+	const cacheKey = buildImageCacheKey(year, month, themeColor, viewMode, events, eventsPage, holidayDays, eventDays);
 
 	const cached = imageCache.get(cacheKey);
 	if (cached !== undefined) {
@@ -78,7 +82,7 @@ export function renderCalendarImage(year: number, month: number, options: Calend
 			svg = buildYearSvg(year, month, RENDER_SIZE, themeColor);
 			break;
 		default:
-			svg = buildMonthSvg(year, month, RENDER_SIZE, themeColor);
+			svg = buildMonthSvg(year, month, RENDER_SIZE, themeColor, holidayDays, eventDays);
 	}
 
 	const image = svgToDataUri(svg, viewMode);
@@ -105,7 +109,17 @@ function svgToDataUri(svg: string, viewMode: CalendarViewMode): string {
 	return `data:image/png;base64,${png.toString("base64")}`;
 }
 
-function buildMonthSvg(year: number, month: number, size: number, themeColor: string): string {
+const HOLIDAY_DOT_COLOR = "#ff0069";
+const EVENT_DOT_COLOR = "#ff9500";
+
+function buildMonthSvg(
+	year: number,
+	month: number,
+	size: number,
+	themeColor: string,
+	holidayDays: Set<number>,
+	eventDays: Set<number>,
+): string {
 	const weeks = buildMonthWeeks(year, month);
 	const today = new Date();
 	const highlightToday = today.getFullYear() === year && today.getMonth() + 1 === month;
@@ -126,6 +140,8 @@ function buildMonthSvg(year: number, month: number, size: number, themeColor: st
 	const dayFontSize = 22;
 	const todayCircleOffsetX = 1.5;
 	const todayCircleOffsetY = -0.5;
+	const holidayDotRadius = Math.min(colWidth, rowHeight) * 0.09;
+	const holidayDotOffsetY = rowHeight * 0.38;
 
 	let svg = svgBackground(size);
 
@@ -154,6 +170,9 @@ function buildMonthSvg(year: number, month: number, size: number, themeColor: st
 			const cy = gridTop + rowHeight * week + rowHeight / 2;
 			const isToday = highlightToday && day === todayDate;
 
+			const isHoliday = holidayDays.has(day);
+			const hasEvent = eventDays.has(day);
+
 			if (isToday) {
 				const radius = Math.min(colWidth, rowHeight) * 0.43;
 				svg += `<circle cx="${cx + todayCircleOffsetX}" cy="${cy + todayCircleOffsetY}" r="${radius}" fill="${escapeXml(themeColor)}"/>`;
@@ -162,6 +181,17 @@ function buildMonthSvg(year: number, month: number, size: number, themeColor: st
 			const fill = isToday ? todayTextColor : "#ececec";
 			const weight = isToday ? 600 : 400;
 			svg += dayText(cx, cy, String(day), dayFontSize, fill, weight);
+
+			const dotY = cy + holidayDotOffsetY;
+			if (isHoliday && hasEvent) {
+				const dotSpacing = holidayDotRadius * 1.6;
+				svg += `<circle cx="${cx - dotSpacing / 2}" cy="${dotY}" r="${holidayDotRadius}" fill="${HOLIDAY_DOT_COLOR}"/>`;
+				svg += `<circle cx="${cx + dotSpacing / 2}" cy="${dotY}" r="${holidayDotRadius}" fill="${EVENT_DOT_COLOR}"/>`;
+			} else if (isHoliday) {
+				svg += `<circle cx="${cx}" cy="${dotY}" r="${holidayDotRadius}" fill="${HOLIDAY_DOT_COLOR}"/>`;
+			} else if (hasEvent) {
+				svg += `<circle cx="${cx}" cy="${dotY}" r="${holidayDotRadius}" fill="${EVENT_DOT_COLOR}"/>`;
+			}
 		}
 	}
 
@@ -320,14 +350,19 @@ function buildImageCacheKey(
 	viewMode: CalendarViewMode,
 	events: CalendarEvent[],
 	eventsPage: number,
+	holidayDays: Set<number>,
+	eventDays: Set<number>,
 ): string {
 	const todayKey = getLocalDateKey();
+	const holidayDigest = [...holidayDays].sort((a, b) => a - b).join(",");
+	const eventDayDigest = [...eventDays].sort((a, b) => a - b).join(",");
+
 	if (viewMode === "events") {
 		const eventDigest = events.map((event) => `${event.start.getTime()}:${event.title}`).join("|");
-		return `${todayKey}:${year}:${month}:${themeColor}:${viewMode}:${eventsPage}:${eventDigest}`;
+		return `${todayKey}:${year}:${month}:${themeColor}:${viewMode}:${eventsPage}:${eventDigest}:${holidayDigest}:${eventDayDigest}`;
 	}
 
-	return `${todayKey}:${year}:${month}:${themeColor}:${viewMode}`;
+	return `${todayKey}:${year}:${month}:${themeColor}:${viewMode}:${holidayDigest}:${eventDayDigest}`;
 }
 
 function normalizeThemeColor(color: string | undefined): string {

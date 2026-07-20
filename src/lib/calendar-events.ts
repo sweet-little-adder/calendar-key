@@ -53,6 +53,21 @@ export async function fetchMonthEvents(year: number, month: number): Promise<Cal
 	return result.events;
 }
 
+/** Day-of-month numbers that have at least one calendar event in the given month. */
+export function getEventDaysInMonth(year: number, month: number, events: CalendarEvent[]): Set<number> {
+	const days = new Set<number>();
+
+	for (const event of events) {
+		if (event.start.getFullYear() !== year || event.start.getMonth() + 1 !== month) {
+			continue;
+		}
+
+		days.add(event.start.getDate());
+	}
+
+	return days;
+}
+
 export function getCachedMonthEventsResult(year: number, month: number): MonthEventsFetchResult | undefined {
 	const cacheKey = `${year}-${month}`;
 	const cached = eventsCache.get(cacheKey);

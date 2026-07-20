@@ -27,6 +27,12 @@
             <option value="12">December</option>
         </sdpi-select>
     </sdpi-item>
+    <sdpi-item label="Public Holidays">
+        <sdpi-select setting="holidayCountry" id="holidayCountrySelect" default="HK">
+            <option value="auto">Auto (timezone / locale)</option>
+            <option value="HK">Hong Kong (HK)</option>
+        </sdpi-select>
+    </sdpi-item>
     <sdpi-item label="Today Color">
         <sdpi-color setting="themeColor" default="#ff0069"></sdpi-color>
     </sdpi-item>
@@ -44,6 +50,46 @@
         }
 
         yearSelect.setAttribute("default", String(currentYear));
+
+        const holidayCountrySelect = document.getElementById("holidayCountrySelect");
+        const fallbackCountries = [
+            { countryCode: "HK", name: "Hong Kong" },
+            { countryCode: "TW", name: "Taiwan" },
+            { countryCode: "CN", name: "China" },
+            { countryCode: "JP", name: "Japan" },
+            { countryCode: "SG", name: "Singapore" },
+            { countryCode: "US", name: "United States" },
+            { countryCode: "GB", name: "United Kingdom" },
+            { countryCode: "AU", name: "Australia" },
+            { countryCode: "CA", name: "Canada" },
+        ];
+
+        function appendCountries(countries) {
+            for (const country of countries) {
+                const option = document.createElement("option");
+                option.value = country.countryCode;
+                option.textContent = `${country.name} (${country.countryCode})`;
+                holidayCountrySelect.appendChild(option);
+            }
+        }
+
+        fetch("https://date.nager.at/api/v3/AvailableCountries")
+            .then((response) => response.json())
+            .then((countries) => {
+                if (!Array.isArray(countries)) {
+                    appendCountries(fallbackCountries);
+                    return;
+                }
+
+                const sorted = countries
+                    .filter((country) => typeof country.countryCode === "string" && typeof country.name === "string")
+                    .sort((a, b) => a.name.localeCompare(b.name));
+
+                appendCountries(sorted);
+            })
+            .catch(() => {
+                appendCountries(fallbackCountries);
+            });
     </script>
 </body>
 

@@ -7,9 +7,16 @@ import streamDeck, {
 	WillAppearEvent,
 } from "@elgato/streamdeck";
 
-import { fetchMonthEventsResult, getCachedMonthEventsResult } from "../lib/calendar-events";
+import { fetchMonthEventsResult, getCachedMonthEventsResult, getEventDaysInMonth } from "../lib/calendar-events";
 import { type CalendarViewMode, getEventsPageCount, renderCalendarImage } from "../lib/calendar-image";
 import { getLocalDateKey, getMsUntilNextMidnight, normalizeYear } from "../lib/calendar";
+import {
+	fetchYearHolidays,
+	getBundledYearHolidays,
+	getCachedYearHolidays,
+	getHolidayDaysInMonth,
+	resolveCountryCode,
+} from "../lib/public-holidays";
 
 const DATE_POLL_INTERVAL_MS = 15_000;
 const REFRESH_BURST_DELAYS_MS = [0, 2_000, 5_000, 15_000];
@@ -23,6 +30,7 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 	private autoRefreshStarted = false;
 	private readonly settingsByAction = new Map<string, MonthCalendarSettings>();
 	private readonly prefetchedMonths = new Set<string>();
+	private readonly prefetchedHolidayYears = new Set<string>();
 
 	constructor() {
 		super();
@@ -40,6 +48,7 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 		this.startAutoRefresh();
 		const settings = this.rememberSettings(ev.action.id, ev.payload.settings);
 		this.prefetchEvents(settings);
+		this.prefetchHolidays(settings);
 		return this.render(ev.action, settings);
 	}
 
@@ -49,12 +58,14 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 
 		if (
 			normalizeYear(previous.year) !== normalizeYear(settings.year) ||
-			normalizeMonth(previous.month) !== normalizeMonth(settings.month)
+			normalizeMonth(previous.month) !== normalizeMonth(settings.month) ||
+			normalizeHolidayCountry(previous.holidayCountry) !== normalizeHolidayCountry(settings.holidayCountry)
 		) {
 			settings.eventsPage = 0;
 			this.rememberSettings(ev.action.id, settings);
 		}
 
+		this.prefetchHolidays(settings);
 		return this.render(ev.action, settings);
 	}
 
@@ -89,7 +100,7 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 
 		this.rememberSettings(ev.action.id, settings);
 
-		void ev.action.setSettings({ viewMode: nextIndex, eventsPage }).catch((error: unknown) => {
+		void ev.action.setSettings(settings).catch((error: unknown) => {
 			streamDeck.logger.error("Failed to persist view mode", error);
 		});
 
@@ -191,12 +202,68 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 					this.prefetchedMonths.delete(cacheKey);
 				}
 
-				return this.refreshEventsViewActions(year, month);
+				return Promise.all([
+					this.refreshEventsViewActions(year, month),
+					this.refreshMonthViewActions(year, month),
+				]);
 			})
 			.catch((error: unknown) => {
 				this.prefetchedMonths.delete(cacheKey);
 				streamDeck.logger.warn("Failed to prefetch calendar events", error);
 			});
+	}
+
+	private prefetchHolidays(settings: MonthCalendarSettings): void {
+		const year = normalizeYear(settings.year);
+		const countryCode = resolveCountryCode(settings.holidayCountry);
+		const cacheKey = `${countryCode}:${year}`;
+		const cached = getCachedYearHolidays(year, countryCode);
+
+		if (cached?.ok === true || this.prefetchedHolidayYears.has(cacheKey)) {
+			return;
+		}
+
+		this.prefetchedHolidayYears.add(cacheKey);
+
+		void fetchYearHolidays(year, countryCode)
+			.then((result) => {
+				streamDeck.logger.info(
+					`Public holidays ${countryCode} ${year}: ok=${result.ok}, count=${result.holidays.length}`,
+				);
+				if (!result.ok) {
+					this.prefetchedHolidayYears.delete(cacheKey);
+				}
+
+				return this.refreshMonthViewActions(year);
+			})
+			.catch((error: unknown) => {
+				this.prefetchedHolidayYears.delete(cacheKey);
+				streamDeck.logger.warn("Failed to prefetch public holidays", error);
+			});
+	}
+
+	private async refreshMonthViewActions(year: number, month?: number): Promise<void> {
+		await Promise.all(
+			[...this.actions].map(async (action) => {
+				const remembered = this.getRememberedSettings(action.id, {});
+				if (getViewMode(remembered.viewMode) !== "month") {
+					return;
+				}
+
+				if (normalizeYear(remembered.year) !== year) {
+					return;
+				}
+
+				const actionMonth = normalizeMonth(remembered.month);
+				if (month !== undefined && actionMonth !== month) {
+					return;
+				}
+
+				const holidayDays = await this.loadHolidayDays(year, actionMonth, remembered);
+				const eventsResult = getCachedMonthEventsResult(year, actionMonth);
+				await this.paint(action, remembered, year, actionMonth, "month", eventsResult, holidayDays);
+			}),
+		);
 	}
 
 	private async refreshEventsViewActions(year: number, month: number): Promise<void> {
@@ -228,18 +295,51 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 		const month = normalizeMonth(settings.month);
 		const year = normalizeYear(settings.year);
 		const viewMode = getViewMode(settings.viewMode);
-		const cachedEvents = viewMode === "events" ? getCachedMonthEventsResult(year, month) : undefined;
-		const needsBackgroundFetch = viewMode === "events" && cachedEvents === undefined;
+		const cachedEvents = getCachedMonthEventsResult(year, month);
+		const needsBackgroundFetch = cachedEvents === undefined;
+		const holidayDays = viewMode === "month" ? await this.loadHolidayDays(year, month, settings) : new Set<number>();
 
-		await this.paint(action, settings, year, month, viewMode, cachedEvents);
+		await this.paint(action, settings, year, month, viewMode, cachedEvents, holidayDays);
 
 		if (needsBackgroundFetch) {
 			void fetchMonthEventsResult(year, month)
-				.then(() => this.refreshEventsViewActions(year, month))
+				.then(() =>
+					Promise.all([
+						this.refreshEventsViewActions(year, month),
+						viewMode === "month" ? this.refreshMonthViewActions(year, month) : Promise.resolve(),
+					]),
+				)
 				.catch((error: unknown) => {
 					streamDeck.logger.warn("Failed to load calendar events", error);
 				});
 		}
+
+		if (viewMode === "month" && getCachedYearHolidays(year, resolveCountryCode(settings.holidayCountry))?.ok !== true) {
+			this.prefetchHolidays(settings);
+		}
+	}
+
+	private async loadHolidayDays(year: number, month: number, settings: MonthCalendarSettings): Promise<Set<number>> {
+		const countryCode = resolveCountryCode(settings.holidayCountry);
+		const cached = getCachedYearHolidays(year, countryCode);
+		if (cached?.ok === true) {
+			return getHolidayDaysInMonth(year, month, cached.holidays);
+		}
+
+		const bundled = getBundledYearHolidays(year, countryCode);
+		if (bundled?.ok === true) {
+			void fetchYearHolidays(year, countryCode);
+			const days = getHolidayDaysInMonth(year, month, bundled.holidays);
+			streamDeck.logger.info(
+				`Public holidays ${countryCode} ${year}-${month} (bundled): [${[...days].join(", ")}]`,
+			);
+			return days;
+		}
+
+		const result = await fetchYearHolidays(year, countryCode);
+		const days = getHolidayDaysInMonth(year, month, result.holidays);
+		streamDeck.logger.info(`Public holidays ${countryCode} ${year}-${month}: [${[...days].join(", ")}]`);
+		return days;
 	}
 
 	private async paint(
@@ -249,15 +349,19 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 		month: number,
 		viewMode: CalendarViewMode,
 		eventsResult: Awaited<ReturnType<typeof fetchMonthEventsResult>> | undefined,
+		holidayDays: Set<number> = new Set(),
 	): Promise<void> {
+		const events = eventsResult?.events ?? [];
 		const image = renderCalendarImage(year, month, {
 			themeColor: settings.themeColor,
 			viewMode,
-			events: eventsResult?.events,
+			events,
 			eventsPage: normalizeEventsPage(settings.eventsPage),
 			eventsLoaded: eventsResult?.ok ?? false,
 			eventsDenied: eventsResult?.denied ?? false,
 			eventsFetchFailed: eventsResult !== undefined && !eventsResult.ok && !eventsResult.denied,
+			holidayDays,
+			eventDays: viewMode === "month" ? getEventDaysInMonth(year, month, events) : new Set<number>(),
 		});
 
 		await action.setImage(image, { target: Target.HardwareAndSoftware });
@@ -271,7 +375,12 @@ type MonthCalendarSettings = {
 	themeColor?: string;
 	viewMode?: number | string;
 	eventsPage?: number | string;
+	holidayCountry?: string;
 };
+
+function normalizeHolidayCountry(country: string | undefined): string {
+	return country === undefined || country === "" ? "auto" : country;
+}
 
 function normalizeMonth(month: number | string | undefined): number {
 	const parsed = typeof month === "string" ? Number.parseInt(month, 10) : month;
