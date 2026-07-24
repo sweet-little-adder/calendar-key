@@ -17,7 +17,7 @@ export type MonthEventsFetchResult = {
 
 const EVENTS_CACHE_TTL_MS = 5 * 60_000;
 const FAILED_EVENTS_CACHE_TTL_MS = 30_000;
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 12_000;
 
 const eventsCache = new Map<string, { result: MonthEventsFetchResult; fetchedAt: number }>();
 const inFlightFetches = new Map<string, Promise<MonthEventsFetchResult>>();
@@ -46,6 +46,13 @@ function getFetchBinaryPath(): string {
 	];
 
 	return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}
+
+function getDisclaimSpawnPath(): string | undefined {
+	const root = getPluginRoot();
+	const moduleDir = dirname(fileURLToPath(import.meta.url));
+	const candidates = [join(root, "bin", "disclaim-spawn"), join(moduleDir, "disclaim-spawn")];
+	return candidates.find((candidate) => existsSync(candidate));
 }
 
 export async function fetchMonthEvents(year: number, month: number): Promise<CalendarEvent[]> {
@@ -170,13 +177,24 @@ function parseEvents(stdout: string): CalendarEvent[] {
 	return events;
 }
 
+/**
+ * Prefer disclaim-spawn so CalendarFetch is its own TCC responsible process.
+ * Direct children of Stream Deck are blocked (Stream Deck lacks the calendars entitlement).
+ */
 function runFetchBinary(
 	fetchEventsBinary: string,
 	year: number,
 	month: number,
 ): Promise<{ stdout: string; exitCode: number | null; timedOut: boolean; stderr: string }> {
 	return new Promise((resolve) => {
-		const proc = spawn(fetchEventsBinary, [String(year), String(month)]);
+		const disclaimSpawn = getDisclaimSpawnPath();
+		const command = disclaimSpawn ?? fetchEventsBinary;
+		const args =
+			disclaimSpawn !== undefined
+				? [fetchEventsBinary, String(year), String(month)]
+				: [String(year), String(month)];
+
+		const proc = spawn(command, args);
 		let stdout = "";
 		let stderr = "";
 		let timedOut = false;

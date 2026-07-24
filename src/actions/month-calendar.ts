@@ -200,6 +200,8 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 						`Calendar fetch for ${year}-${month} failed (denied=${result.denied}, events=${result.events.length})`,
 					);
 					this.prefetchedMonths.delete(cacheKey);
+				} else {
+					streamDeck.logger.info(`Calendar fetch for ${year}-${month} loaded ${result.events.length} events`);
 				}
 
 				return Promise.all([
