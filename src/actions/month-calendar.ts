@@ -7,7 +7,12 @@ import streamDeck, {
 	WillAppearEvent,
 } from "@elgato/streamdeck";
 
-import { fetchMonthEventsResult, getCachedMonthEventsResult, getEventDaysInMonth } from "../lib/calendar-events";
+import {
+	fetchMonthEventsResult,
+	getCachedMonthEventsResult,
+	getEventDaysInMonth,
+	getEventsSignature,
+} from "../lib/calendar-events";
 import { type CalendarViewMode, getEventsPageCount, renderCalendarImage } from "../lib/calendar-image";
 import { getLocalDateKey, getMsUntilNextMidnight, normalizeYear } from "../lib/calendar";
 import {
@@ -19,6 +24,8 @@ import {
 } from "../lib/public-holidays";
 
 const DATE_POLL_INTERVAL_MS = 15_000;
+/** How often to re-read Apple Calendar for visible keys (new/edited/deleted events). */
+const EVENTS_POLL_INTERVAL_MS = 15_000;
 const REFRESH_BURST_DELAYS_MS = [0, 2_000, 5_000, 15_000];
 const VIEW_MODES: CalendarViewMode[] = ["month", "events", "year"];
 
@@ -26,11 +33,15 @@ const VIEW_MODES: CalendarViewMode[] = ["month", "events", "year"];
 export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 	private refreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private datePollTimer: ReturnType<typeof setInterval> | undefined;
+	private eventsPollTimer: ReturnType<typeof setInterval> | undefined;
 	private lastKnownDateKey = getLocalDateKey();
 	private autoRefreshStarted = false;
+	private eventsRefreshInFlight = false;
 	private readonly settingsByAction = new Map<string, MonthCalendarSettings>();
 	private readonly prefetchedMonths = new Set<string>();
 	private readonly prefetchedHolidayYears = new Set<string>();
+	/** Last painted event fingerprint per year-month, used to skip no-op re-paints. */
+	private readonly lastEventsSignatureByMonth = new Map<string, string>();
 
 	constructor() {
 		super();
@@ -104,9 +115,26 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 			streamDeck.logger.error("Failed to persist view mode", error);
 		});
 
-		void this.render(ev.action, settings).catch((error: unknown) => {
-			streamDeck.logger.error("Failed to cycle view mode", error);
-		});
+		// Switching into month/events is a good moment to re-read Apple Calendar (not on page flips).
+		const shouldForceEvents =
+			process.platform === "darwin" &&
+			viewMode !== nextViewMode &&
+			(nextViewMode === "events" || nextViewMode === "month");
+
+		void (async () => {
+			try {
+				if (shouldForceEvents) {
+					const year = normalizeYear(settings.year);
+					const month = normalizeMonth(settings.month);
+					const result = await fetchMonthEventsResult(year, month, { force: true });
+					this.lastEventsSignatureByMonth.set(`${year}-${month}`, getEventsSignature(result));
+				}
+
+				await this.render(ev.action, settings);
+			} catch (error: unknown) {
+				streamDeck.logger.error("Failed to cycle view mode", error);
+			}
+		})();
 	}
 
 	private rememberSettings(actionId: string, settings: MonthCalendarSettings): MonthCalendarSettings {
@@ -135,8 +163,13 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 
 			this.lastKnownDateKey = today;
 			streamDeck.logger.info(`Calendar date changed to ${today}; refreshing keys.`);
-			void this.refreshAllVisibleActions();
+			void this.refreshAllVisibleActions({ forceEvents: true });
 		}, DATE_POLL_INTERVAL_MS);
+
+		// Re-read Apple Calendar periodically so new events appear without restarting the plugin.
+		this.eventsPollTimer = setInterval(() => {
+			void this.refreshAllVisibleActions({ forceEvents: true, onlyIfEventsChanged: true });
+		}, EVENTS_POLL_INTERVAL_MS);
 	}
 
 	private scheduleDailyRefresh(): void {
@@ -146,7 +179,7 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 
 		this.refreshTimer = setTimeout(() => {
 			this.lastKnownDateKey = getLocalDateKey();
-			void this.refreshAllVisibleActions();
+			void this.refreshAllVisibleActions({ forceEvents: true });
 			this.scheduleDailyRefresh();
 		}, getMsUntilNextMidnight());
 	}
@@ -157,12 +190,19 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 		for (const delay of REFRESH_BURST_DELAYS_MS) {
 			setTimeout(() => {
 				this.lastKnownDateKey = getLocalDateKey();
-				void this.refreshAllVisibleActions();
+				void this.refreshAllVisibleActions({ forceEvents: true });
 			}, delay);
 		}
 	}
 
-	private async refreshAllVisibleActions(): Promise<void> {
+	/**
+	 * Re-paint every visible key. When forceEvents is true (macOS), re-fetch Apple Calendar
+	 * for the months currently on the board so added/edited/deleted events show up.
+	 */
+	private async refreshAllVisibleActions(options?: {
+		forceEvents?: boolean;
+		onlyIfEventsChanged?: boolean;
+	}): Promise<void> {
 		const actions = [...this.actions];
 		if (actions.length === 0) {
 			return;
@@ -170,12 +210,72 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 
 		this.lastKnownDateKey = getLocalDateKey();
 
+		const forceEvents = options?.forceEvents === true && process.platform === "darwin";
+		let eventsChanged = !options?.onlyIfEventsChanged;
+
+		if (forceEvents) {
+			eventsChanged = (await this.reloadVisibleMonthEvents()) || !options?.onlyIfEventsChanged;
+		}
+
+		if (options?.onlyIfEventsChanged && !eventsChanged) {
+			return;
+		}
+
 		await Promise.all(
 			actions.map(async (action) => {
 				const settings = this.getRememberedSettings(action.id, {});
 				await this.render(action, settings);
 			}),
 		);
+	}
+
+	/** Force-fetch Apple Calendar for every distinct month currently shown. Returns true if any month's data changed. */
+	private async reloadVisibleMonthEvents(): Promise<boolean> {
+		if (this.eventsRefreshInFlight) {
+			return false;
+		}
+
+		const months = new Map<string, { year: number; month: number }>();
+		for (const action of this.actions) {
+			const settings = this.getRememberedSettings(action.id, {});
+			const year = normalizeYear(settings.year);
+			const month = normalizeMonth(settings.month);
+			months.set(`${year}-${month}`, { year, month });
+		}
+
+		if (months.size === 0) {
+			return false;
+		}
+
+		this.eventsRefreshInFlight = true;
+		let anyChanged = false;
+
+		try {
+			await Promise.all(
+				[...months.entries()].map(async ([cacheKey, { year, month }]) => {
+					const previousSignature =
+						this.lastEventsSignatureByMonth.get(cacheKey) ??
+						getEventsSignature(getCachedMonthEventsResult(year, month));
+
+					const result = await fetchMonthEventsResult(year, month, { force: true });
+					const nextSignature = getEventsSignature(result);
+					this.lastEventsSignatureByMonth.set(cacheKey, nextSignature);
+
+					if (nextSignature !== previousSignature) {
+						anyChanged = true;
+						streamDeck.logger.info(
+							`Calendar events changed for ${year}-${month} (${result.events.length} events, ok=${result.ok})`,
+						);
+					}
+				}),
+			);
+		} catch (error: unknown) {
+			streamDeck.logger.warn("Failed to reload visible calendar events", error);
+		} finally {
+			this.eventsRefreshInFlight = false;
+		}
+
+		return anyChanged;
 	}
 
 	private prefetchEvents(settings: MonthCalendarSettings): void {
@@ -195,6 +295,8 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 
 		void fetchMonthEventsResult(year, month)
 			.then((result) => {
+				this.lastEventsSignatureByMonth.set(cacheKey, getEventsSignature(result));
+
 				if (!result.ok) {
 					streamDeck.logger.warn(
 						`Calendar fetch for ${year}-${month} failed (denied=${result.denied}, events=${result.events.length})`,
@@ -305,12 +407,13 @@ export class MonthCalendar extends SingletonAction<MonthCalendarSettings> {
 
 		if (needsBackgroundFetch) {
 			void fetchMonthEventsResult(year, month)
-				.then(() =>
-					Promise.all([
+				.then((result) => {
+					this.lastEventsSignatureByMonth.set(`${year}-${month}`, getEventsSignature(result));
+					return Promise.all([
 						this.refreshEventsViewActions(year, month),
 						viewMode === "month" ? this.refreshMonthViewActions(year, month) : Promise.resolve(),
-					]),
-				)
+					]);
+				})
 				.catch((error: unknown) => {
 					streamDeck.logger.warn("Failed to load calendar events", error);
 				});

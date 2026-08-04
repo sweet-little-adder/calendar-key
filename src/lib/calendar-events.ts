@@ -90,16 +90,30 @@ export function getCachedMonthEventsResult(year: number, month: number): MonthEv
 	return cached.result;
 }
 
-export async function fetchMonthEventsResult(year: number, month: number): Promise<MonthEventsFetchResult> {
+export type FetchMonthEventsOptions = {
+	/** Bypass the in-memory cache and re-read Apple Calendar. */
+	force?: boolean;
+};
+
+export async function fetchMonthEventsResult(
+	year: number,
+	month: number,
+	options?: FetchMonthEventsOptions,
+): Promise<MonthEventsFetchResult> {
 	const cacheKey = `${year}-${month}`;
-	const cached = eventsCache.get(cacheKey);
-	if (cached !== undefined) {
-		const ttl = cached.result.ok ? EVENTS_CACHE_TTL_MS : FAILED_EVENTS_CACHE_TTL_MS;
-		if (Date.now() - cached.fetchedAt < ttl) {
-			return cached.result;
+	const force = options?.force === true;
+
+	if (!force) {
+		const cached = eventsCache.get(cacheKey);
+		if (cached !== undefined) {
+			const ttl = cached.result.ok ? EVENTS_CACHE_TTL_MS : FAILED_EVENTS_CACHE_TTL_MS;
+			if (Date.now() - cached.fetchedAt < ttl) {
+				return cached.result;
+			}
 		}
 	}
 
+	// Share an in-flight request when possible (even for force) to avoid parallel spawns.
 	const inFlight = inFlightFetches.get(cacheKey);
 	if (inFlight !== undefined) {
 		return inFlight;
@@ -116,6 +130,24 @@ export async function fetchMonthEventsResult(year: number, month: number): Promi
 
 	inFlightFetches.set(cacheKey, fetchPromise);
 	return fetchPromise;
+}
+
+/** Stable fingerprint so callers can skip re-paint when nothing changed. */
+export function getEventsSignature(result: MonthEventsFetchResult | undefined): string {
+	if (result === undefined) {
+		return "undefined";
+	}
+
+	const eventLines = result.events
+		.map((event) => {
+			const y = event.start.getFullYear();
+			const m = event.start.getMonth() + 1;
+			const d = event.start.getDate();
+			return `${y}-${m}-${d}\t${event.title}`;
+		})
+		.join("\n");
+
+	return `${result.ok ? 1 : 0}:${result.denied ? 1 : 0}:${eventLines}`;
 }
 
 async function loadMonthEvents(year: number, month: number): Promise<MonthEventsFetchResult> {
